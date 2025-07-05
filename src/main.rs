@@ -5,6 +5,8 @@ use std::process;
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
     if pattern.chars().count() == 1 {
         return input_line.contains(pattern);
+    } else if pattern == r"\d" {
+        input_line.chars().any(|char| char.is_ascii_digit())
     } else {
         panic!("Unhandled pattern: {}", pattern)
     }
