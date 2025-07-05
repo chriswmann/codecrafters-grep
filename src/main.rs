@@ -7,6 +7,7 @@ use std::process;
 /// Supported patterns:
 /// - A single character: returns true if the character is present in the input line.
 /// - `\d`: returns true if the input line contains at least one ASCII digit.
+/// - '\w' returns true if the input contains at least one of a-z, A-Z, 0-9 or _.
 ///
 /// # Arguments
 ///
@@ -20,6 +21,9 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
     match pattern {
         p if p.len() == 1 => input_line.contains(p),
         r"\d" => input_line.chars().any(|char| char.is_ascii_digit()),
+        r"\w" => input_line
+            .chars()
+            .any(|char| char.is_alphanumeric() || char == '_'),
         _ => false,
     }
 }
