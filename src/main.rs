@@ -22,6 +22,13 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
         p if p.len() == 1 => input_line.contains(p),
         r"\d" => input_line.chars().any(|char| char.is_ascii_digit()),
         r"\w" => input_line.chars().any(|char| char.is_alphanumeric()),
+        p if p.len() >= 3
+            && p.as_bytes().first() == Some(&b'[')
+            && p.as_bytes().last() == Some(&b']') =>
+        {
+            p.chars()
+                .any(|pchar| input_line.chars().any(|ilchar| ilchar == pchar))
+        }
         _ => false,
     }
 }
