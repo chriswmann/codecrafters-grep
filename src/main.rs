@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::io;
 use std::process;
@@ -7,7 +8,9 @@ use std::process;
 /// Supported patterns:
 /// - A single character: returns true if the character is present in the input line.
 /// - `\d`: returns true if the input line contains at least one ASCII digit.
-/// - '\w' returns true if the input contains at least one of a-z, A-Z, 0-9 or _.
+/// - `\w`: returns true if the input contains at least one of a-z, A-Z, 0-9 or _.
+/// - Positive character group `[abc]`: returns true if the input contains at least one character from the group.
+/// - Negative character group `[^abc]`: returns true if the input contains at least one character not in the group.
 ///
 /// # Arguments
 ///
@@ -22,12 +25,15 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
         p if p.len() == 1 => input_line.contains(p),
         r"\d" => input_line.chars().any(|char| char.is_ascii_digit()),
         r"\w" => input_line.chars().any(|char| char.is_alphanumeric()),
-        p if p.len() >= 3
-            && p.as_bytes().first() == Some(&b'[')
-            && p.as_bytes().last() == Some(&b']') =>
-        {
-            p.chars()
-                .any(|pchar| input_line.chars().any(|ilchar| ilchar == pchar))
+        p if p.starts_with("[") && p.ends_with("]") => {
+            let pchars = &p[1..p.len() - 1];
+            if pchars.starts_with('^') {
+                let forbidden = pchars[1..].chars().collect::<HashSet<_>>();
+                input_line.chars().any(|c| !forbidden.contains(&c))
+            } else {
+                let allowed = pchars.chars().collect::<HashSet<_>>();
+                input_line.chars().any(|c| allowed.contains(&c))
+            }
         }
         _ => false,
     }
