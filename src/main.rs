@@ -2,13 +2,25 @@ use std::env;
 use std::io;
 use std::process;
 
+/// Checks if the input line matches the given pattern.
+///
+/// Supported patterns:
+/// - A single character: returns true if the character is present in the input line.
+/// - `\d`: returns true if the input line contains at least one ASCII digit.
+///
+/// # Arguments
+///
+/// * `input_line` - The line of text to search within.
+/// * `pattern` - The pattern to match against the input line.
+///
+/// # Returns
+///
+/// * `true` if the pattern matches the input line, otherwise `false`.
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
-    if pattern.chars().count() == 1 {
-        return input_line.contains(pattern);
-    } else if pattern == r"\d" {
-        input_line.chars().any(|char| char.is_ascii_digit())
-    } else {
-        panic!("Unhandled pattern: {}", pattern)
+    match pattern {
+        p if p.len() == 1 => input_line.contains(p),
+        r"\d" => input_line.chars().any(|char| char.is_ascii_digit()),
+        _ => false,
     }
 }
 
