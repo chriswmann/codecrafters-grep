@@ -11,6 +11,7 @@ enum Token {
     Range(String),
     Literal(String),
     WordCharacter,
+    StartAnchor,
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,7 @@ enum Expr {
     WordCharacter,
     Range(String),
     Literal(String),
+    StartAnchor,
     Sequence(Vec<Expr>),
 }
 
@@ -61,6 +63,13 @@ fn tokenise(input: &str) -> Vec<Token> {
 
     while let Some((i, chr)) = chars.next() {
         match chr {
+            '^' => {
+                if i == 0 {
+                    tokens.push(Token::StartAnchor);
+                } else {
+                    tokens.push(Token::Literal("^".to_string()));
+                }
+            }
             '\\' => {
                 if let Some((_, next_chr)) = chars.peek() {
                     match next_chr {
@@ -127,6 +136,37 @@ fn tokenise(input: &str) -> Vec<Token> {
     tokens
 }
 
+/// Parses a slice of tokens into an abstract syntax tree (AST) expression.
+///
+/// This function takes a sequence of tokenized regex pattern elements and converts
+/// them into a hierarchical expression structure that can be evaluated for pattern
+/// matching. Each token type is mapped to its corresponding expression type.
+///
+/// # Arguments
+///
+/// * `tokens` - A slice of `Token` enum variants representing the tokenized regex pattern
+///
+/// # Returns
+///
+/// Returns an `Expr::Sequence` containing a vector of expressions, where each expression
+/// corresponds to a token from the input. The sequence represents the entire parsed
+/// regex pattern as a single evaluatable expression.
+///
+/// # Token to Expression Mapping
+///
+/// * `Token::Digit` → `Expr::Digit` - Matches any digit character (0-9)
+/// * `Token::Whitespace` → `Expr::Whitespace` - Matches whitespace characters
+/// * `Token::Range(r)` → `Expr::Range(r)` - Matches character ranges like [a-z]
+/// * `Token::Literal(l)` → `Expr::Literal(l)` - Matches literal string characters
+/// * `Token::WordCharacter` → `Expr::WordCharacter` - Matches word characters (\w)
+///
+/// # Example
+///
+/// ```
+/// let tokens = vec![Token::Literal("hello".to_string()), Token::Digit];
+/// let expr = parse(&tokens);
+/// // Returns: Expr::Sequence([Expr::Literal("hello"), Expr::Digit])
+/// ```
 fn parse(tokens: &[Token]) -> Expr {
     let mut exprs = vec![];
 
@@ -137,6 +177,7 @@ fn parse(tokens: &[Token]) -> Expr {
             Token::Range(r) => Expr::Range(r.to_owned()),
             Token::Literal(l) => Expr::Literal(l.to_owned()),
             Token::WordCharacter => Expr::WordCharacter,
+            Token::StartAnchor => Expr::StartAnchor,
         };
         exprs.push(expr);
     }
@@ -146,7 +187,7 @@ fn parse(tokens: &[Token]) -> Expr {
 /// A recursive function that tries to match an expression at a specific position in the input string
 ///
 /// Returns Some(new_position) if match succeeds, None if it fails
-///Handles each expression type differently
+/// Handles each expression type differently
 fn match_expr(input: &str, expr: &Expr, start_pos: usize) -> Option<usize> {
     match expr {
         Expr::Digit => {
@@ -200,6 +241,14 @@ fn match_expr(input: &str, expr: &Expr, start_pos: usize) -> Option<usize> {
                 None
             }
         }
+        Expr::StartAnchor => {
+            // ^ matches only at the beginning of the string
+            if start_pos == 0 {
+                Some(start_pos)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -241,10 +290,18 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
     let tokens = tokenise(pattern);
     let expr = parse(&tokens);
 
-    // Try matching at every position in the input
-    for i in 0..input_line.len() {
-        if let Some(_) = match_expr(input_line, &expr, i) {
-            return true;
+    // Check if the pattern starts with a start anchor
+    let has_start_anchor = matches!(tokens.first(), Some(Token::StartAnchor));
+
+    if has_start_anchor {
+        // If there's a start anchor, we only want to match from the start of the string
+        return match_expr(input_line, &expr, 0).is_some();
+    } else {
+        // Try matching at every position in the input
+        for i in 0..input_line.len() {
+            if let Some(_) = match_expr(input_line, &expr, i) {
+                return true;
+            }
         }
     }
 
