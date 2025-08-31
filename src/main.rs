@@ -1,8 +1,13 @@
-// See https://claude.ai/chat/f8c552a7-d4a5-4394-a3f2-cf1c59892b2e
 #![warn(clippy::all)]
 use std::env;
 use std::io;
 use std::process;
+
+#[derive(thiserror::Error, Debug)]
+enum GrepError {
+    #[error("Could not parse pattern")]
+    InvalidPattern,
+}
 
 #[derive(Debug, Clone)]
 enum Token {
@@ -13,6 +18,7 @@ enum Token {
     WordCharacter,
     StartAnchor,
     EndAnchor,
+    OneOrMore,
 }
 
 #[derive(Debug, Clone)]
@@ -24,7 +30,8 @@ enum Expr {
     Literal(String),
     StartAnchor,
     EndAnchor,
-    Sequence(Vec<Expr>),
+    OneOrMore(Box<Expr>),
+    Sequence(Vec<Box<Expr>>),
 }
 
 /// Tokenises a simplified regular expression pattern string into a vector of `Token`s.
@@ -59,7 +66,7 @@ enum Expr {
 /// // tokens: [Token::Digit, Token::Range("[a-z]".to_string()), Token::Literal("cat".to_string())]
 /// ```
 ///
-fn tokenise(input: &str) -> Vec<Token> {
+fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
     let mut tokens = Vec::new();
     let mut chars = input.char_indices().peekable();
 
@@ -87,6 +94,10 @@ fn tokenise(input: &str) -> Vec<Token> {
                         }
                         'w' => {
                             tokens.push(Token::WordCharacter);
+                            chars.next();
+                        }
+                        '+' => {
+                            tokens.push(Token::OneOrMore);
                             chars.next();
                         }
                         '\\' => {
@@ -129,26 +140,39 @@ fn tokenise(input: &str) -> Vec<Token> {
                     tokens.push(Token::Literal("$".to_string()));
                 }
             }
-            _ => {
-                // Collect consecutive literal characters
-                let start_pos = i;
-                let mut end_pos = i + chr.len_utf8();
-
-                while let Some((pos, chr)) = chars.peek() {
-                    // If we hit one of these chars, we need to break out so we can handle them in the
-                    // outer loop, as they could indicate a special character.
-                    if matches!(chr, '\\' | '[' | '$') {
-                        break;
-                    }
-                    end_pos = pos + chr.len_utf8();
-                    chars.next();
+            '+' => {
+                eprintln!("Found + operator!");
+                // One or more unless escaped. Only makes sense if it follows another token
+                if tokens.is_empty() {
+                    return Err(GrepError::InvalidPattern);
+                } else {
+                    tokens.push(Token::OneOrMore);
                 }
-                let literal = &input[start_pos..end_pos];
-                tokens.push(Token::Literal(literal.to_string()));
+            }
+            _ => {
+                // eprintln!("Processing as literal starting with '{}'", chr);
+                // // Collect consecutive literal characters
+                // let start_pos = i;
+                // let mut end_pos = i + chr.len_utf8();
+
+                // while let Some((pos, chr)) = chars.peek() {
+                //     // If we hit one of these chars, we need to break out so we can handle them in the
+                //     // outer loop, as they could indicate a special character.
+                //     if matches!(chr, '\\' | '[' | '$' | '+') {
+                //         break;
+                //     }
+                //     end_pos = pos + chr.len_utf8();
+                //     chars.next();
+                // }
+                let literal = &input.chars().nth(i).unwrap();
+                if !matches!(chr, '\\' | '[' | '$' | '+') {
+                    tokens.push(Token::Literal(literal.to_string()));
+                }
             }
         }
     }
-    tokens
+    eprintln!("Tokens: {:?}", tokens.clone());
+    Ok(tokens)
 }
 
 /// Parses a slice of tokens into an abstract syntax tree (AST) expression.
@@ -182,7 +206,7 @@ fn tokenise(input: &str) -> Vec<Token> {
 /// let expr = parse(&tokens);
 /// // Returns: Expr::Sequence([Expr::Literal("hello"), Expr::Digit])
 /// ```
-fn parse(tokens: &[Token]) -> Expr {
+fn parse(tokens: &[Token]) -> Result<Expr, GrepError> {
     let mut exprs = vec![];
 
     for token in tokens {
@@ -194,10 +218,15 @@ fn parse(tokens: &[Token]) -> Expr {
             Token::WordCharacter => Expr::WordCharacter,
             Token::StartAnchor => Expr::StartAnchor,
             Token::EndAnchor => Expr::EndAnchor,
+            Token::OneOrMore => match exprs.pop() {
+                Some(expr) => Expr::OneOrMore(expr),
+                None => return Err(GrepError::InvalidPattern),
+            },
         };
-        exprs.push(expr);
+        exprs.push(Box::new(expr));
     }
-    Expr::Sequence(exprs)
+    eprintln!("Parsed tokens: {:?}", Expr::Sequence(exprs.clone()));
+    Ok(Expr::Sequence(exprs))
 }
 
 /// A recursive function that tries to match an expression at a specific position in the input string
@@ -271,6 +300,29 @@ fn match_expr(input: &str, expr: &Expr, start_pos: usize) -> Option<usize> {
             // start_pos == input.len() means we're just past the last character
             if start_pos == input.len() {
                 Some(start_pos)
+            } else {
+                None
+            }
+        }
+        Expr::OneOrMore(inner_expr) => {
+            // We must match at least once
+            // We'll loop through the expressions while the current expression matches the inner one
+            let mut pos = start_pos;
+            let mut match_count = 0;
+
+            while let Some(new_pos) = match_expr(input, inner_expr, pos) {
+                // We got a new_pos so that's one match
+                match_count += 1;
+
+                // But if we have a zero-width match we will get stuck in an infinite loop
+                if pos == new_pos {
+                    break;
+                }
+                pos = new_pos;
+            }
+
+            if match_count >= 1 {
+                Some(pos)
             } else {
                 None
             }
@@ -360,8 +412,8 @@ fn get_char_at(input: &str, pos: usize) -> Option<char> {
 ///
 /// * `bool` - true if the pattern matches anywhere in the input, false otherwise
 fn match_pattern(input_line: &str, pattern: &str) -> bool {
-    let tokens = tokenise(pattern);
-    let expr = parse(&tokens);
+    let tokens = tokenise(pattern).unwrap();
+    let expr = parse(&tokens).unwrap();
 
     // Check if the pattern starts with a start anchor
     let has_start_anchor = matches!(tokens.first(), Some(Token::StartAnchor));
@@ -374,7 +426,7 @@ fn match_pattern(input_line: &str, pattern: &str) -> bool {
         // Without start anchor, try matching at every position in the input
         // This implements the standard regex behavior of finding matches anywhere
         for i in 0..input_line.len() {
-            if let Some(_) = match_expr(input_line, &expr, i) {
+            if match_expr(input_line, &expr, i).is_some() {
                 return true;
             }
         }
