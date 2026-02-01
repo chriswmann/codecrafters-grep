@@ -36,7 +36,7 @@ impl Regex {
         Ok(Regex { tokens, exprs })
     }
 
-    fn matches(&self, input: &str) -> Result<bool, GrepError> {
+    fn matches(&self, input: &str) -> bool {
         match_pattern(input, &self.tokens, &self.exprs)
     }
 }
@@ -63,6 +63,8 @@ enum Token {
     EndAnchor,
     /// Quantifier: matches the preceding token one or more times. Corresponds to `+`.
     OneOrMore,
+    /// Quantifier: matches the preceding token zero or more times. Corresponds to `?`.
+    ZeroOrOne,
 }
 
 /// Represents a parsed expression node in the regex AST.
@@ -84,9 +86,13 @@ enum Expr {
     /// Asserts position is at the start of the input (zero-width).
     StartAnchor,
     /// Asserts position is at the end of the input (zero-width).
+    /// Asserts position is at the end of the input (zero-width).
     EndAnchor,
     /// Matches the inner expression one or more times (greedy).
+    /// Matches the inner expression one or more times (greedy).
     OneOrMore(Box<Expr>),
+    /// Matches the inner expression zero or one times.
+    ZeroOrOne(Box<Expr>),
 }
 
 /// Tokenises a simplified regular expression pattern string into a vector of `Token`s.
@@ -175,6 +181,13 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 }
                 tokens.push(Token::OneOrMore);
             }
+            '?' => {
+                // Zero or one unless escaped. Only makes sense if it follows another token
+                if tokens.is_empty() {
+                    return Err(GrepError::InvalidPattern);
+                }
+                tokens.push(Token::ZeroOrOne);
+            }
             _ => {
                 // Collect consecutive literal characters
                 let start_pos = i;
@@ -183,7 +196,7 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 while let Some((pos, chr)) = chars.peek() {
                     // If we hit one of these chars, we need to break out so we can handle them in the
                     // outer loop, as they could indicate a special character.
-                    if matches!(chr, '\\' | '[' | '$' | '+' | '^') {
+                    if matches!(chr, '\\' | '[' | '$' | '+' | '^' | '?') {
                         break;
                     }
                     end_pos = pos + chr.len_utf8();
@@ -191,7 +204,8 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 }
                 // If + follows, the last character in our batch is its target —
                 // split it off into its own token so the parser can wrap it correctly.
-                if matches!(chars.peek(), Some((_, '+'))) {
+                if matches!(chars.peek(), Some((_, '+'))) || matches!(chars.peek(), Some((_, '?')))
+                {
                     let split_pos = input[start_pos..end_pos]
                         .char_indices()
                         .last()
@@ -226,6 +240,10 @@ fn match_escaped(chars: &mut std::iter::Peekable<std::str::CharIndices>, tokens:
             }
             '+' => {
                 tokens.push(Token::Literal("+".to_string()));
+                chars.next();
+            }
+            '?' => {
+                tokens.push(Token::Literal("?".to_string()));
                 chars.next();
             }
             '^' => {
@@ -309,6 +327,10 @@ fn parse(tokens: &[Token]) -> Result<Vec<Expr>, GrepError> {
                 Some(expr) => Expr::OneOrMore(Box::new(expr)),
                 None => return Err(GrepError::InvalidPattern),
             },
+            Token::ZeroOrOne => match exprs.pop() {
+                Some(expr) => Expr::ZeroOrOne(Box::new(expr)),
+                None => return Err(GrepError::InvalidPattern),
+            },
         };
         exprs.push(expr);
     }
@@ -378,7 +400,7 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
                 }
             }
             Expr::StartAnchor => {
-                // ^ Asserts we're at the beginning; doesn't consume any characters
+                // ^ asserts we're at the beginning; doesn't consume any characters
                 // Returns the same position if we're at the start, None otherwise
                 if start_pos == 0 {
                     match_exprs(input, rest, start_pos)
@@ -400,6 +422,15 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
                 let mut pos = start_pos;
                 let mut positions = Vec::new();
 
+                // Check forwards greedily. We want to match as many characters as possible.
+                // Keep the matched positions in `positions` so we can backtrack afterwards.
+                // We need to backtrack for cases such as when the pattern is 'ca+at' and the input is 'caaats'.
+                // The forward pass will match upto, and including the last 'a' in 'caaats'. But our tokeniser
+                // will tokenise the expression with `Literal("at")` as the last token. If we have
+                // matched the last 'a', that only leaves 'ts' to match on but our final expression
+                // won't match that. We need to backtrack one 'a' in the input to leave 'ats', so
+                // that the final expression, `Literal("at")` will match the 'at' in 'ats' and
+                // return a positive match.
                 while let Some(new_pos) = match_exprs(input, &[*prev_expr.clone()], pos) {
                     if new_pos == pos {
                         break;
@@ -407,13 +438,23 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
                     pos = new_pos;
                     positions.push(pos);
                 }
-                // Backtrack phase: try from greediest to least greedy
+                // Backtrack phase: try from greediest to least greedy so that we stop at the
+                // greediest match possible. Backtrack in the input, checking the first expression
+                // in the remaining expressions.
                 for &candidate in positions.iter().rev() {
                     if let Some(end) = match_exprs(input, rest, candidate) {
                         return Some(end);
                     }
                 }
                 None
+            }
+            Expr::ZeroOrOne(prev_expr) => {
+                // The `?` quantifier matches the previous character zero or one times
+                // Check if the previous expression matches. If no match, use `start_pos`
+                let pos = match_exprs(input, &[*prev_expr.clone()], start_pos).unwrap_or(start_pos);
+                // Otherwise we have a match so continue with the rest of the expressions from the
+                // new position
+                match_exprs(input, rest, pos)
             }
         }
     } else {
@@ -498,7 +539,7 @@ fn get_char_at(input: &[char], pos: usize) -> Option<char> {
 /// # Returns
 ///
 /// * `bool` - true if the pattern matches anywhere in the input, false otherwise
-fn match_pattern(input_line: &str, tokens: &[Token], exprs: &[Expr]) -> Result<bool, GrepError> {
+fn match_pattern(input_line: &str, tokens: &[Token], exprs: &[Expr]) -> bool {
     // Check if the pattern starts with a start anchor
     let has_start_anchor = matches!(tokens.first(), Some(Token::StartAnchor));
     let input_chars: Vec<char> = input_line.chars().collect();
@@ -506,22 +547,22 @@ fn match_pattern(input_line: &str, tokens: &[Token], exprs: &[Expr]) -> Result<b
     if has_start_anchor {
         // Start anchor means the pattern must match from the very beginning
         // No need to try other positions - this is how ^ works in regex
-        return Ok(match_exprs(&input_chars, &exprs, 0).is_some());
+        return match_exprs(&input_chars, exprs, 0).is_some();
     }
     // Without start anchor, try matching at every position in the input
     // This implements the standard regex behavior of finding matches anywhere
     for i in 0..input_line.len() {
-        if match_exprs(&input_chars, &exprs, i).is_some() {
-            return Ok(true);
+        if match_exprs(&input_chars, exprs, i).is_some() {
+            return true;
         }
     }
 
     // Handle empty string case: when input_line.len() == 0, the for loop above doesn't execute
     // We still need to check if the pattern can match an empty string (e.g., pattern like "^$")
-    if match_exprs(&input_chars, &exprs, 0).is_some() {
-        return Ok(true);
+    if match_exprs(&input_chars, exprs, 0).is_some() {
+        return true;
     }
-    Ok(false)
+    false
 }
 
 /// Entry point for the grep program.
@@ -551,7 +592,7 @@ fn main() -> Result<(), GrepError> {
         .read_line(&mut input_line)
         .map_err(|_| GrepError::IoError);
     let regex = Regex::new(&pattern)?;
-    if regex.matches(&input_line)? {
+    if regex.matches(&input_line) {
         process::exit(0)
     } else {
         process::exit(1)
