@@ -65,6 +65,8 @@ enum Token {
     OneOrMore,
     /// Quantifier: matches the preceding token zero or more times. Corresponds to `?`.
     ZeroOrOne,
+    /// Matches any character except newline.
+    WildCard,
 }
 
 /// Represents a parsed expression node in the regex AST.
@@ -93,6 +95,8 @@ enum Expr {
     OneOrMore(Box<Expr>),
     /// Matches the inner expression zero or one times.
     ZeroOrOne(Box<Expr>),
+    /// Matches any character except newline.
+    WildCard,
 }
 
 /// Tokenises a simplified regular expression pattern string into a vector of `Token`s.
@@ -188,6 +192,10 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 }
                 tokens.push(Token::ZeroOrOne);
             }
+            '.' => {
+                // Any character except newlines
+                tokens.push(Token::WildCard);
+            }
             _ => {
                 // Collect consecutive literal characters
                 let start_pos = i;
@@ -196,7 +204,7 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 while let Some((pos, chr)) = chars.peek() {
                     // If we hit one of these chars, we need to break out so we can handle them in the
                     // outer loop, as they could indicate a special character.
-                    if matches!(chr, '\\' | '[' | '$' | '+' | '^' | '?') {
+                    if matches!(chr, '\\' | '[' | '$' | '+' | '^' | '?' | '.') {
                         break;
                     }
                     end_pos = pos + chr.len_utf8();
@@ -260,6 +268,10 @@ fn match_escaped(chars: &mut std::iter::Peekable<std::str::CharIndices>, tokens:
             }
             ']' => {
                 tokens.push(Token::Literal("]".to_string()));
+                chars.next();
+            }
+            '.' => {
+                tokens.push(Token::WildCard);
                 chars.next();
             }
             '\\' => {
@@ -331,6 +343,7 @@ fn parse(tokens: &[Token]) -> Result<Vec<Expr>, GrepError> {
                 Some(expr) => Expr::ZeroOrOne(Box::new(expr)),
                 None => return Err(GrepError::InvalidPattern),
             },
+            Token::WildCard => Expr::WildCard,
         };
         exprs.push(expr);
     }
@@ -455,6 +468,15 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
                 // Otherwise we have a match so continue with the rest of the expressions from the
                 // new position
                 match_exprs(input, rest, pos)
+            }
+            Expr::WildCard => {
+                // Match any character except newlines
+                let char = get_char_at(input, start_pos)?;
+                if char == '\n' || char == '\r' {
+                    None
+                } else {
+                    match_exprs(input, rest, start_pos + 1)
+                }
             }
         }
     } else {
