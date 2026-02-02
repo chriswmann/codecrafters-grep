@@ -17,6 +17,9 @@ use std::process;
 
 #[derive(thiserror::Error, Debug)]
 enum GrepError {
+    #[error("Invalid arguments")]
+    InvalidArguments,
+
     #[error("Could not parse pattern")]
     InvalidPattern,
 
@@ -25,7 +28,6 @@ enum GrepError {
 }
 
 struct Regex {
-    tokens: Vec<Token>,
     exprs: Vec<Expr>,
 }
 
@@ -33,11 +35,11 @@ impl Regex {
     pub fn new(pattern: &str) -> Result<Self, GrepError> {
         let tokens = tokenise(pattern)?;
         let exprs = parse(&tokens)?;
-        Ok(Regex { tokens, exprs })
+        Ok(Regex { exprs })
     }
 
     fn matches(&self, input: &str) -> bool {
-        match_pattern(input, &self.tokens, &self.exprs)
+        match_pattern(input, &self.exprs)
     }
 }
 
@@ -45,7 +47,7 @@ impl Regex {
 ///
 /// Tokens are the output of lexical analysis (tokenisation) and represent
 /// the atomic elements of a regex pattern before parsing into expressions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Token {
     /// Matches any ASCII digit (0-9). Corresponds to `\d`.
     Digit,
@@ -67,13 +69,15 @@ enum Token {
     ZeroOrOne,
     /// Matches any character except newline.
     WildCard,
+    /// Matches alternatives, e.g., `(cat|dog)` or `(g|d)`.
+    Alternation(String),
 }
 
 /// Represents a parsed expression node in the regex AST.
 ///
 /// Expressions form the abstract syntax tree (AST) after parsing tokens.
 /// Unlike tokens, expressions can be nested (e.g., `OneOrMore` wraps another `Expr`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Expr {
     /// Matches any ASCII digit (0-9).
     Digit,
@@ -88,15 +92,15 @@ enum Expr {
     /// Asserts position is at the start of the input (zero-width).
     StartAnchor,
     /// Asserts position is at the end of the input (zero-width).
-    /// Asserts position is at the end of the input (zero-width).
     EndAnchor,
-    /// Matches the inner expression one or more times (greedy).
     /// Matches the inner expression one or more times (greedy).
     OneOrMore(Box<Expr>),
     /// Matches the inner expression zero or one times.
     ZeroOrOne(Box<Expr>),
     /// Matches any character except newline.
     WildCard,
+    /// Alternation (`|`)
+    Alternation(Vec<Vec<Expr>>),
 }
 
 /// Tokenises a simplified regular expression pattern string into a vector of `Token`s.
@@ -119,6 +123,10 @@ enum Expr {
 /// - `Token::StartAnchor`: Represents `^` at the start of the pattern.
 /// - `Token::EndAnchor`: Represents `$` at the end of the pattern.
 /// - `Token::OneOrMore`: Represents `+`.
+/// - `Token::ZeroOrOne`: Represents `?`.
+/// - `Token::WildCard`: Represents `.`.
+/// - `Token::Alternation(Vec<Vec<Expr>>)`: Represents a set of alternatives, e.g. `(cat|dog)`, `(A|B|C)`.
+///   Outer Vec is for each alternative, inner Vec is for each character in the alternative.
 ///
 /// # Behavior
 ///
@@ -127,6 +135,7 @@ enum Expr {
 /// - Treats unmatched `[` as a literal.
 /// - Ignores whitespace outside of character classes.
 /// - Groups consecutive literal characters into a single `Token::Literal`.
+/// - Treats unmatched `(` as a literal.
 ///
 /// # Example
 ///
@@ -151,7 +160,7 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 }
             }
             '\\' => {
-                match_escaped(&mut chars, &mut tokens);
+                match_escaped(&mut chars, &mut tokens)?;
             }
             '[' => {
                 // Parse a character class like [0-9]
@@ -196,6 +205,22 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 // Any character except newlines
                 tokens.push(Token::WildCard);
             }
+            '(' => {
+                // Parse alternations, like (cat|dog)
+                // Look for the closing bracket
+                let remainder = &input[i..];
+                if let Some(end_pos) = remainder.find(')') {
+                    let alternatives = &remainder[..=end_pos];
+                    tokens.push(Token::Alternation(alternatives.to_string()));
+                    // Skip ahead, past the alternation
+                    for _ in 0..end_pos {
+                        chars.next();
+                    }
+                } else {
+                    // No closing bracket, treat as a literal
+                    tokens.push(Token::Literal("(".to_string()));
+                }
+            }
             _ => {
                 // Collect consecutive literal characters
                 let start_pos = i;
@@ -204,7 +229,7 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
                 while let Some((pos, chr)) = chars.peek() {
                     // If we hit one of these chars, we need to break out so we can handle them in the
                     // outer loop, as they could indicate a special character.
-                    if matches!(chr, '\\' | '[' | '$' | '+' | '^' | '?' | '.') {
+                    if matches!(chr, '\\' | '[' | '$' | '+' | '^' | '?' | '.' | '(') {
                         break;
                     }
                     end_pos = pos + chr.len_utf8();
@@ -231,7 +256,10 @@ fn tokenise(input: &str) -> Result<Vec<Token>, GrepError> {
     Ok(tokens)
 }
 
-fn match_escaped(chars: &mut std::iter::Peekable<std::str::CharIndices>, tokens: &mut Vec<Token>) {
+fn match_escaped(
+    chars: &mut std::iter::Peekable<std::str::CharIndices>,
+    tokens: &mut Vec<Token>,
+) -> Result<(), GrepError> {
     if let Some((_, next_chr)) = chars.peek() {
         match next_chr {
             'd' => {
@@ -271,7 +299,15 @@ fn match_escaped(chars: &mut std::iter::Peekable<std::str::CharIndices>, tokens:
                 chars.next();
             }
             '.' => {
-                tokens.push(Token::WildCard);
+                tokens.push(Token::Literal(".".to_string()));
+                chars.next();
+            }
+            '(' => {
+                tokens.push(Token::Literal("(".to_string()));
+                chars.next();
+            }
+            ')' => {
+                tokens.push(Token::Literal(")".to_string()));
                 chars.next();
             }
             '\\' => {
@@ -279,15 +315,15 @@ fn match_escaped(chars: &mut std::iter::Peekable<std::str::CharIndices>, tokens:
                 tokens.push(Token::Literal(r"\".into()));
                 chars.next();
             }
-            other => {
-                eprintln!("Unknown escape sequence: {other}");
-                chars.next();
+            _ => {
+                return Err(GrepError::InvalidPattern);
             }
         }
     } else {
         // Trailing backslash, so treat as a literal char
         tokens.push(Token::Literal("\\".to_string()));
     }
+    Ok(())
 }
 
 /// Parses a slice of tokens into an abstract syntax tree (AST) expression.
@@ -315,7 +351,9 @@ fn match_escaped(chars: &mut std::iter::Peekable<std::str::CharIndices>, tokens:
 /// * `Token::StartAnchor` → `Expr::StartAnchor` - Asserts position at start of input
 /// * `Token::EndAnchor` → `Expr::EndAnchor` - Asserts position at end of input
 /// * `Token::OneOrMore` → `Expr::OneOrMore(prev)` - Wraps the preceding expression for 1+ matching
-///
+/// * `Token::ZeroOrOne` → `Expr::ZeroOrOne(prev)` - Wraps the preceding expression for {0,1} matching
+/// * `Token::WildCard` → `Expr::WildCard` -- Matches any character except newline
+/// * `Token::Alternation(a)` → `Expr::Alternation(alts)` - Matches alternatives
 /// # Example
 ///
 /// ```
@@ -344,6 +382,15 @@ fn parse(tokens: &[Token]) -> Result<Vec<Expr>, GrepError> {
                 None => return Err(GrepError::InvalidPattern),
             },
             Token::WildCard => Expr::WildCard,
+            Token::Alternation(inner) => {
+                let without_parens = &inner[1..inner.len() - 1];
+                let mut expressions = Vec::new();
+                for alt in without_parens.split('|') {
+                    let expression = alt.chars().map(|c| Expr::Literal(c.to_string())).collect();
+                    expressions.push(expression);
+                }
+                Expr::Alternation(expressions)
+            }
         };
         exprs.push(expr);
     }
@@ -381,7 +428,7 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
             }
             Expr::Whitespace => {
                 let char = get_char_at(input, start_pos)?;
-                if char.is_whitespace() {
+                if char.is_ascii_whitespace() {
                     match_exprs(input, rest, start_pos + 1)
                 } else {
                     None
@@ -444,7 +491,7 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
                 // won't match that. We need to backtrack one 'a' in the input to leave 'ats', so
                 // that the final expression, `Literal("at")` will match the 'at' in 'ats' and
                 // return a positive match.
-                while let Some(new_pos) = match_exprs(input, &[*prev_expr.clone()], pos) {
+                while let Some(new_pos) = match_exprs(input, std::slice::from_ref(prev_expr), pos) {
                     if new_pos == pos {
                         break;
                     } // zero-width guard
@@ -464,7 +511,8 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
             Expr::ZeroOrOne(prev_expr) => {
                 // The `?` quantifier matches the previous character zero or one times
                 // Check if the previous expression matches. If no match, use `start_pos`
-                let pos = match_exprs(input, &[*prev_expr.clone()], start_pos).unwrap_or(start_pos);
+                let pos = match_exprs(input, std::slice::from_ref(prev_expr), start_pos)
+                    .unwrap_or(start_pos);
                 // Otherwise we have a match so continue with the rest of the expressions from the
                 // new position
                 match_exprs(input, rest, pos)
@@ -477,6 +525,14 @@ fn match_exprs(input: &[char], exprs: &[Expr], start_pos: usize) -> Option<usize
                 } else {
                     match_exprs(input, rest, start_pos + 1)
                 }
+            }
+            Expr::Alternation(alternatives) => {
+                for alt in alternatives {
+                    if let Some(end) = match_exprs(input, alt, start_pos) {
+                        return match_exprs(input, rest, end);
+                    }
+                }
+                None
             }
         }
     } else {
@@ -561,9 +617,9 @@ fn get_char_at(input: &[char], pos: usize) -> Option<char> {
 /// # Returns
 ///
 /// * `bool` - true if the pattern matches anywhere in the input, false otherwise
-fn match_pattern(input_line: &str, tokens: &[Token], exprs: &[Expr]) -> bool {
+fn match_pattern(input_line: &str, exprs: &[Expr]) -> bool {
     // Check if the pattern starts with a start anchor
-    let has_start_anchor = matches!(tokens.first(), Some(Token::StartAnchor));
+    let has_start_anchor = matches!(exprs.first(), Some(Expr::StartAnchor));
     let input_chars: Vec<char> = input_line.chars().collect();
 
     if has_start_anchor {
@@ -581,10 +637,7 @@ fn match_pattern(input_line: &str, tokens: &[Token], exprs: &[Expr]) -> bool {
 
     // Handle empty string case: when input_line.len() == 0, the for loop above doesn't execute
     // We still need to check if the pattern can match an empty string (e.g., pattern like "^$")
-    if match_exprs(&input_chars, exprs, 0).is_some() {
-        return true;
-    }
-    false
+    match_exprs(&input_chars, exprs, 0).is_some()
 }
 
 /// Entry point for the grep program.
@@ -602,17 +655,15 @@ fn match_pattern(input_line: &str, tokens: &[Token], exprs: &[Expr]) -> bool {
 fn main() -> Result<(), GrepError> {
     eprintln!("Logs from your program will appear here!");
 
-    if env::args().nth(1).unwrap() != "-E" {
+    if env::args().nth(1).ok_or(GrepError::InvalidArguments)? != "-E" {
         println!("Expected first argument to be '-E'");
         process::exit(1);
     }
 
-    let pattern = env::args().nth(2).unwrap();
+    let pattern = env::args().nth(2).ok_or(GrepError::InvalidArguments)?;
     let mut input_line = String::new();
 
-    _ = io::stdin()
-        .read_line(&mut input_line)
-        .map_err(|_| GrepError::IoError);
+    io::stdin().read_line(&mut input_line)?;
     let regex = Regex::new(&pattern)?;
     if regex.matches(&input_line) {
         process::exit(0)
